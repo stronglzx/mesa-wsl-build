@@ -49,7 +49,7 @@ jobs:
             libXdamage-devel \
             libXrandr-devel \
             libXxf86vm-devel \
-            libXshmfence-devel \
+            libxshmfence-devel \
             libxcb-devel \
             libxkbcommon-devel \
             xorg-x11-proto-devel \
