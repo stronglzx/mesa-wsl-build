@@ -1,165 +1,128 @@
-
-name: Build Mesa D3D12 for AlmaLinux 8
-
-on:
-  workflow_dispatch:
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-    container:
-      image: almalinux:8.10
-
-    defaults:
-      run:
-        shell: bash
-
-    steps:
-      - name: Install build dependencies
-        run: |
-          dnf install -y dnf-plugins-core
-          dnf config-manager --set-enabled powertools
-
-          dnf install -y \
-            gcc-toolset-12-gcc \
-            gcc-toolset-12-gcc-c++ \
-            gcc-toolset-12-binutils \
-            make cmake git \
-            ninja-build \
-            pkgconf-pkg-config \
-            python3.11 python3.11-pip \
-            python3.11-devel \
-            bison flex \
-            curl tar xz \
-            llvm-devel llvm \
-            clang \
-            glibc-devel \
-            libdrm-devel \
-            expat-devel \
-            zlib-devel \
-            libzstd-devel \
-            elfutils-libelf-devel \
-            libffi-devel \
-            libX11-devel \
-            libXext-devel \
-            libXfixes-devel \
-            libXdamage-devel \
-            libXrandr-devel \
-            libXxf86vm-devel \
-            libxshmfence-devel \
-            libxcb-devel \
-            libxkbcommon-devel \
-            xorg-x11-proto-devel \
-            wayland-devel \
-            wayland-protocols-devel
-
+            libX11-devel libXext-devel libXfixes-devel libXdamage-devel \
+            libXrandr-devel libXxf86vm-devel libxshmfence-devel \
+            libxcb-devel libxkbcommon-devel xorg-x11-proto-devel \
+            wayland-devel wayland-protocols-devel
           python3.11 -m venv /opt/build-venv
+          /opt/build-venv/bin/pip install meson==1.5.2 mako packaging pyyaml
+          source /opt/rh/gcc-toolset-12/enable
+          gcc --version
+          llvm-config --version
+          llvm-config --includedir
+          ccache --version
+          ccache -z
 
-          /opt/build-venv/bin/pip install \
-            meson==1.5.2 \
-            mako packaging pyyaml
-
-      
       - name: Build DirectX Headers
         run: |
           source /opt/rh/gcc-toolset-12/enable
-
-          git clone --depth 1 \
-            --branch v1.610.0 \
-            https://github.com/microsoft/DirectX-Headers.git \
-            /tmp/DirectX-Headers
-
-          cmake \
-            -S /tmp/DirectX-Headers \
-            -B /tmp/DirectX-Headers/build \
-            -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=/usr/local \
+          archive="$CACHE_ROOT/downloads/directx-headers-$DX_VERSION.tar.gz"
+          if [ ! -s "$archive" ]; then
+            curl -fL --retry 3 "https://github.com/microsoft/DirectX-Headers/archive/refs/tags/$DX_VERSION.tar.gz" -o "$archive.tmp"
+            mv "$archive.tmp" "$archive"
+          fi
+          mkdir -p /tmp/DirectX-Headers
+          tar -xzf "$archive" -C /tmp/DirectX-Headers --strip-components=1
+          cmake -S /tmp/DirectX-Headers -B /tmp/DirectX-Headers/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
             -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-            -DDXHEADERS_BUILD_TEST=OFF \
-            -DDXHEADERS_BUILD_GOOGLE_TEST=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DDXHEADERS_BUILD_TEST=OFF -DDXHEADERS_BUILD_GOOGLE_TEST=OFF \
             -DDXHEADERS_INSTALL=ON
-
-          cmake --build /tmp/DirectX-Headers/build -j2
+          cmake --build /tmp/DirectX-Headers/build -j4
           cmake --install /tmp/DirectX-Headers/build
 
       - name: Download Mesa
         run: |
-          mkdir -p /tmp/mesa-source
-          cd /tmp/mesa-source
-
-          curl -fL --retry 3 \
-            https://archive.mesa3d.org/mesa-24.3.4.tar.xz \
-            -o mesa.tar.xz
-
-          tar -xf mesa.tar.xz
-
-      - name: Check LLVM version
-        run: |
-          llvm-config --version
-          llvm-config --includedir
-          rpm -q llvm llvm-devel llvm-libs
+          archive="$CACHE_ROOT/downloads/mesa-$MESA_VERSION.tar.xz"
+          if ! echo "$MESA_SHA256  $archive" | sha256sum -c --status; then
+            curl -fL --retry 3 "https://archive.mesa3d.org/mesa-$MESA_VERSION.tar.xz" -o "$archive.tmp"
+            echo "$MESA_SHA256  $archive.tmp" | sha256sum -c -
+            mv "$archive.tmp" "$archive"
+          fi
+          mkdir -p "$MESA_SOURCE"
+          tar -xf "$archive" -C "$MESA_SOURCE" --strip-components=1
+          test -f "$MESA_SOURCE/meson.build"
 
       - name: Configure Mesa
         run: |
           source /opt/rh/gcc-toolset-12/enable
           source /opt/build-venv/bin/activate
-
+          export CC='ccache gcc'
+          export CXX='ccache g++'
           export PKG_CONFIG_PATH=/usr/local/lib64/pkgconfig:/usr/local/lib/pkgconfig
-
-          cd /tmp/mesa-source/mesa-24.3.4
-
+          cd "$MESA_SOURCE"
           meson setup build \
-            --prefix=/opt/mesa-d3d12 \
-            --libdir=lib64 \
-            --buildtype=release \
-            -Dplatforms=x11 \
-            -Dgallium-drivers=d3d12,swrast \
-            -Dvulkan-drivers=[] \
-            -Dglx=dri \
-            -Dglvnd=false \
-            -Degl=enabled \
-            -Dllvm=enabled \
-            -Dshared-llvm=enabled \
-            -Dgallium-va=disabled \
-            -Dgallium-vdpau=disabled \
-            -Dgallium-xa=disabled \
-            -Dgallium-nine=false
+            --prefix="$MESA_PREFIX" --libdir=lib64 --buildtype=release \
+            -Dplatforms=x11 -Dgallium-drivers=d3d12,swrast \
+            '-Dvulkan-drivers=[]' -Dglx=dri -Dglvnd=false \
+            -Degl=enabled -Dllvm=enabled -Dshared-llvm=enabled \
+            -Dgallium-va=disabled -Dgallium-vdpau=disabled \
+            -Dgallium-xa=disabled -Dgallium-nine=false
 
       - name: Compile Mesa
         run: |
           source /opt/rh/gcc-toolset-12/enable
           source /opt/build-venv/bin/activate
-
-          cd /tmp/mesa-source/mesa-23.1.4
-
-          ninja -C build -j2
-
+          cd "$MESA_SOURCE"
+          jobs=$(nproc)
+          if [ "$jobs" -gt 4 ]; then jobs=4; fi
+          echo "Compiling with $jobs workers"
+          ninja -C build -j"$jobs"
           ninja -C build install
 
       - name: Inspect build
         run: |
-          ls -lh /opt/mesa-d3d12/lib64/
-          ls -lh /opt/mesa-d3d12/lib64/dri/
-
-          ldd /opt/mesa-d3d12/lib64/libGL.so.1
-
-          ldd /opt/mesa-d3d12/lib64/dri/swrast_dri.so
+          ls -lh "$MESA_PREFIX/lib64/" "$MESA_PREFIX/lib64/dri/"
+          test -e "$MESA_PREFIX/lib64/libGL.so.1"
+          test -e "$MESA_PREFIX/lib64/dri/swrast_dri.so"
+          export LD_LIBRARY_PATH="$MESA_PREFIX/lib64:${LD_LIBRARY_PATH:-}"
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          for lib in "$MESA_PREFIX/lib64/libGL.so.1" "$MESA_PREFIX/lib64/dri/swrast_dri.so"; do
+            ldd "$lib"
+          done | tee "$GITHUB_WORKSPACE/output/runtime-dependencies.txt"
+          rpm -q llvm-libs libstdc++ libdrm libxshmfence >> "$GITHUB_WORKSPACE/output/runtime-dependencies.txt"
+          if grep -q 'not found' "$GITHUB_WORKSPACE/output/runtime-dependencies.txt"; then
+            echo 'Unresolved runtime libraries: inspect the dependency report.'
+            exit 1
+          fi
 
       - name: Package Mesa
         run: |
           mkdir -p "$GITHUB_WORKSPACE/output"
-
-          tar -czf \
-            "$GITHUB_WORKSPACE/output/mesa-d3d12-almalinux8.tar.gz" \
-            -C /opt mesa-d3d12
+          tar -czf "$GITHUB_WORKSPACE/output/mesa-d3d12-almalinux8.tar.gz" -C /opt mesa-d3d12
+          cd "$GITHUB_WORKSPACE/output"
+          sha256sum mesa-d3d12-almalinux8.tar.gz > SHA256SUMS
 
       - name: Upload compiled files
         uses: actions/upload-artifact@v4
         with:
           name: mesa-d3d12-almalinux8
-          path: output/mesa-d3d12-almalinux8.tar.gz
+          path: output/
           retention-days: 7
+
+      - name: Upload diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mesa-build-diagnostics
+          path: |
+            /tmp/mesa-source/build/meson-logs/
+            output/runtime-dependencies.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Show compiler cache statistics
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then ccache -s; fi
+          du -sh "$CACHE_ROOT" /var/cache/dnf || true
+
+      - name: Save compiler cache
+        if: always() && !cancelled()
+        uses: actions/cache/save@v4
+        with:
+          path: /opt/build-cache/ccache
+          key: mesa-el8-gcc12-ccache-v2-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save download cache
+        if: always() && !cancelled()
